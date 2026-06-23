@@ -2,60 +2,88 @@
 <html lang="it">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rotta — Ottimizzatore</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
-        body { font-family: sans-serif; background: #0E1B2E; color: #fff; padding: 20px; }
-        .card { background: #142440; padding: 20px; border-radius: 14px; margin-bottom: 20px; }
-        .btn { background: #F2B441; padding: 10px 20px; border-radius: 99px; cursor: pointer; border: none; font-weight: bold; }
+        :root { --bg:#0E1B2E; --amber:#F2B441; --text:#F3F6FA; }
+        body { background: var(--bg); color: var(--text); font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
+        .card { background: #142440; padding: 25px; border-radius: 14px; margin-bottom: 20px; }
+        .btn { display: inline-block; background: var(--amber); color: #000; padding: 12px 24px; border-radius: 99px; text-decoration: none; font-weight: bold; cursor: pointer; border: none; margin-top: 10px; }
+        ul { padding-left: 20px; color: #92A6C4; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>1. Carica File</h2>
+        <h2>1. Carica Anagrafica</h2>
         <input type="file" id="fileInput" accept=".xlsx,.csv">
+        <p id="status" style="font-size: 12px; color: #F2B441;"></p>
     </div>
+    
     <div class="card">
-        <h2>2. Partenza</h2>
-        <input type="text" id="originLat" placeholder="Latitudine">
-        <input type="text" id="originLon" placeholder="Longitudine">
-        <button class="btn" id="calcBtn">Ottimizza Percorso</button>
+        <h2>2. Ottimizzazione</h2>
+        <button class="btn" id="calcBtn">Usa GPS e Ottimizza Percorso</button>
     </div>
-    <div id="results" class="card"></div>
+
+    <div id="results" class="card" style="display:none;"></div>
 
     <script>
         let clientData = [];
-        document.getElementById('fileInput').addEventListener('change', (e) => {
+
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const status = document.getElementById('status');
+            status.textContent = "Caricamento e geocodifica in corso... attendere.";
+            
             const reader = new FileReader();
-            reader.onload = (evt) => {
+            reader.onload = async (evt) => {
                 const wb = XLSX.read(new Uint8Array(evt.target.result), {type: 'array'});
-                clientData = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-                alert("File caricato con " + clientData.length + " clienti.");
+                const rawData = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+                
+                clientData = [];
+                for(let row of rawData) {
+                    // Cerca colonna 'Indirizzo' o 'Via'
+                    const addr = row['Indirizzo'] || row['Via'] || "";
+                    const cap = row['Cap'] || "";
+                    if(!addr) continue;
+
+                    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addr + ', ' + cap)}&limit=1`);
+                    const data = await res.json();
+                    if(data.length > 0) {
+                        clientData.push({ name: addr, lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) });
+                    }
+                }
+                status.textContent = "Fatto! " + clientData.length + " clienti trovati sulla mappa.";
             };
             reader.readAsArrayBuffer(e.target.files[0]);
         });
 
         document.getElementById('calcBtn').onclick = () => {
-            const origin = { lat: parseFloat(document.getElementById('originLat').value), lon: parseFloat(document.getElementById('originLon').value) };
-            let unvisited = [...clientData];
-            let path = [];
-            let current = origin;
-
-            while(unvisited.length > 0) {
-                let nearestIdx = 0;
-                let minDist = Infinity;
-                unvisited.forEach((item, idx) => {
-                    const d = Math.sqrt((item.Latitudine - current.lat)**2 + (item.Longitudine - current.lon)**2);
-                    if(d < minDist) { minDist = d; nearestIdx = idx; }
-                });
-                current = unvisited.splice(nearestIdx, 1)[0];
-                path.push(current);
-            }
-
-            const waypoints = path.map(p => `${p.Latitudine},${p.Longitudine}`).join('|');
-            const link = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lon}&destination=${path[path.length-1].Latitudine},${path[path.length-1].Longitudine}&waypoints=${waypoints}&travelmode=driving`;
+            if(clientData.length === 0) return alert("Carica prima il file!");
             
-            document.getElementById('results').innerHTML = `<h3>Percorso Pronto:</h3><a href="${link}" target="_blank" class="btn">🚀 Apri in Google Maps</a><ul>` + path.map(p => `<li>${p.Nome || 'Cliente'}</li>`).join('') + `</ul>`;
+            navigator.geolocation.getCurrentPosition((pos) => {
+                const origin = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                let unvisited = [...clientData];
+                let path = [];
+                let current = origin;
+
+                while(unvisited.length > 0) {
+                    let nearestIdx = 0;
+                    let minDist = Infinity;
+                    unvisited.forEach((item, idx) => {
+                        const d = Math.sqrt((item.lat - current.lat)**2 + (item.lon - current.lon)**2);
+                        if(d < minDist) { minDist = d; nearestIdx = idx; }
+                    });
+                    current = unvisited.splice(nearestIdx, 1)[0];
+                    path.push(current);
+                }
+
+                const waypoints = path.map(p => `${p.lat},${p.lon}`).join('/');
+                const link = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lon}&destination=${path[path.length-1].lat},${path[path.length-1].lon}&waypoints=${waypoints.replace(/\//g, '|')}&travelmode=driving`;
+                
+                const resDiv = document.getElementById('results');
+                resDiv.style.display = 'block';
+                resDiv.innerHTML = `<h3>Percorso Ottimizzato</h3><a href="${link}" target="_blank" class="btn">🚀 Apri in Google Maps</a><ul>` + path.map(p => `<li>${p.name}</li>`).join('') + `</ul>`;
+            }, () => alert("GPS disattivato: non posso calcolare la rotta senza la tua posizione."));
         };
     </script>
 </body>
